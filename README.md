@@ -10,7 +10,7 @@ whether transaction network structure improves fraud detection beyond
 individual transaction features alone.
 
 ## Status
-EDA complete (see `research/trials.ipynb`). Key findings:
+EDA complete (see `research/WDA.ipynb`). Key findings:
 - Severe class imbalance: ~2.2% illicit within full dataset, ~9.8%
   within labeled data — PR-AUC/F1 on the illicit class used instead
   of accuracy.
