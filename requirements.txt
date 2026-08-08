@@ -4,5 +4,9 @@ pandas
 matplotlib
 seaborn
 scikit-learn
-networkx    
+networkx
+torch
+torch-geometric
+python-louvain
+tqdm
 -e .
