@@ -92,8 +92,10 @@ class TestPipeline(unittest.TestCase):
         self.assertIsInstance(data, Data)
         # Nodes = 4, Features = 165 raw + 5 topo = 170
         self.assertEqual(data.x.shape, (4, 170))
-        # Edges = 3
-        self.assertEqual(data.edge_index.shape, (2, 3))
+        # Edges = 3 original → 6 after to_undirected() (each edge + its reverse).
+        # to_undirected() is an intentional fix applied in Week 3-4 to enable
+        # bidirectional message passing. The assertion must reflect this.
+        self.assertEqual(data.edge_index.shape, (2, 6))
         # Labels map checking (1->1, 2->0, unknown->-1)
         self.assertListEqual(data.y.tolist(), [1, 0, -1, 1])
 
