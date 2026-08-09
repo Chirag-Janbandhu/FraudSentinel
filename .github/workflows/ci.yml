@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Lint ──────────────────────────────────────────────────────────────────
+  # Runs independently — a lint failure does NOT block the test job below.
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # style warnings won't block test results
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        run: ruff check src/ tests/
+
+  # ── Tests ─────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests (Python 3.11)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Cache pip's download cache to speed up repeated runs.
+      # The cache key includes the OS and a hash of requirements.txt so it
+      # auto-invalidates whenever dependencies change.
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Install PyTorch CPU-only before the rest of requirements.txt.
+      # The default `torch` on PyPI would pull a CUDA wheel on Linux runners,
+      # which is large (~2 GB) and unnecessary for a CPU-only test suite.
+      # Pinning the CPU index here keeps CI installs fast and reproducible.
+      - name: Install PyTorch (CPU-only)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # Install torch-geometric after torch so its optional CUDA deps are skipped.
+      - name: Install torch-geometric (CPU-only)
+        run: |
+          pip install torch-geometric
+
+      # Install everything else (numpy, pandas, scikit-learn, xgboost, …).
+      # setup.py reads requirements.txt and re-tries torch/pyg, but pip's
+      # already-installed check means they won't be re-downloaded.
+      - name: Install project dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run unit tests
+        run: python -m unittest discover tests

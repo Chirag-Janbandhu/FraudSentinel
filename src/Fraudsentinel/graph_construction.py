@@ -230,6 +230,10 @@ def create_pyg_data(
         edges_df[["source_idx", "target_idx"]].values.T,
         dtype=torch.long
     )
+    
+    # Make edge_index undirected (bidirectional) for GNN message passing
+    from torch_geometric.utils import to_undirected
+    edge_index = to_undirected(edge_index)
 
     # --- Temporal split masks (labeled nodes only) ---
     time_steps = torch.tensor(merged_df["time_step"].values, dtype=torch.long)

@@ -8,5 +8,6 @@ networkx
 torch
 torch-geometric
 python-louvain
+xgboost
 tqdm
 -e .
