@@ -1,3 +1,3 @@
-from Fraudsentinel.logger import logger, get_logger
+from Fraudsentinel.logger import get_logger, logger
 
-__all__ = ["logger", "get_logger"]
+__all__ = ["get_logger", "logger"]

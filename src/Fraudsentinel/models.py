@@ -23,16 +23,13 @@ Design note on class imbalance
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import List, Optional, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-from torch_geometric.nn import SAGEConv, GCNConv, GATConv
+from torch import Tensor, nn
+from torch_geometric.nn import GATConv, GCNConv, SAGEConv
 
 from Fraudsentinel.logger import get_logger
 
@@ -93,8 +90,8 @@ class XGBoostFraudClassifier:
         self.colsample_bytree = colsample_bytree
         self.early_stopping_rounds = early_stopping_rounds
         self.random_state = random_state
-        self.model: Optional[object] = None
-        self.scale_pos_weight: Optional[float] = None
+        self.model: object | None = None
+        self.scale_pos_weight: float | None = None
 
     # ------------------------------------------------------------------
     # Fit
@@ -106,7 +103,7 @@ class XGBoostFraudClassifier:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-    ) -> "XGBoostFraudClassifier":
+    ) -> XGBoostFraudClassifier:
         """
         Train the XGBoost classifier.
 
@@ -165,13 +162,13 @@ class XGBoostFraudClassifier:
     # Persistence
     # ------------------------------------------------------------------
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.model.save_model(str(path))
         logger.info(f"XGBoost model saved to {path}")
 
-    def load(self, path: Union[str, Path]) -> "XGBoostFraudClassifier":
+    def load(self, path: str | Path) -> XGBoostFraudClassifier:
         path = Path(path)
         self.model = self._xgb.XGBClassifier()
         self.model.load_model(str(path))
@@ -210,7 +207,7 @@ class GraphSAGEClassifier(nn.Module):
     ----------
     in_channels : int
         Number of input node features (170 for this dataset).
-    hidden_channels : List[int]
+    hidden_channels : list[int]
         Width of each SAGEConv layer. Default [256, 128] (2 layers).
     dropout : float
         Dropout probability applied after each hidden layer.
@@ -224,7 +221,7 @@ class GraphSAGEClassifier(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        hidden_channels: Optional[List[int]] = None,
+        hidden_channels: list[int] | None = None,
         dropout: float = 0.3,
         aggr: str = "max",
     ):
@@ -316,7 +313,7 @@ class GCNClassifier(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        hidden_channels: Optional[List[int]] = None,
+        hidden_channels: list[int] | None = None,
         dropout: float = 0.3,
     ):
         super().__init__()
@@ -393,7 +390,7 @@ class GATClassifier(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        hidden_channels: Optional[List[int]] = None,
+        hidden_channels: list[int] | None = None,
         dropout: float = 0.3,
         heads: int = 4,
     ):

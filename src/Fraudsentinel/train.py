@@ -34,24 +34,29 @@ from __future__ import annotations
 import pickle
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
+from torch import nn
 from torch_geometric.data import Data
 
 from Fraudsentinel.logger import get_logger
-from Fraudsentinel.models import XGBoostFraudClassifier, GraphSAGEClassifier, GCNClassifier, GATClassifier
+from Fraudsentinel.models import (
+    GATClassifier,
+    GCNClassifier,
+    GraphSAGEClassifier,
+    XGBoostFraudClassifier,
+)
 
 logger = get_logger("FraudSentinel.Train")
 
 # ---------------------------------------------------------------------------
 # Default configuration (all hyperparameters in one place, no magic numbers)
 # ---------------------------------------------------------------------------
-DEFAULT_CFG: Dict[str, Any] = {
+DEFAULT_CFG: dict[str, Any] = {
     "xgb": {
         "n_estimators": 500,
         "max_depth": 6,
@@ -131,7 +136,7 @@ def _compute_pos_weight(y_train: np.ndarray) -> torch.Tensor:
 
 def train_xgboost(
     data: Data,
-    cfg: Dict[str, Any] | None = None,
+    cfg: dict[str, Any] | None = None,
     model_dir: str | Path = "models",
 ) -> XGBoostFraudClassifier:
     """
@@ -190,7 +195,7 @@ def train_xgboost(
 
 def train_graphsage(
     data: Data,
-    cfg: Dict[str, Any] | None = None,
+    cfg: dict[str, Any] | None = None,
     model_dir: str | Path = "models",
     device: str | None = None,
     use_pseudo: bool = False,
@@ -375,7 +380,7 @@ def train_graphsage(
 
 def train_gcn(
     data: Data,
-    cfg: Dict[str, Any] | None = None,
+    cfg: dict[str, Any] | None = None,
     model_dir: str | Path = "models",
     device: str | None = None,
     use_pseudo: bool = False,
@@ -514,7 +519,7 @@ def train_gcn(
 
 def train_gat(
     data: Data,
-    cfg: Dict[str, Any] | None = None,
+    cfg: dict[str, Any] | None = None,
     model_dir: str | Path = "models",
     device: str | None = None,
     use_pseudo: bool = False,

@@ -1,14 +1,18 @@
+import sys
 import unittest
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-import torch
 from torch_geometric.data import Data
 
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from Fraudsentinel.graph_construction import remap_nodes, engineer_topological_features, create_pyg_data
+from Fraudsentinel.graph_construction import (
+    create_pyg_data,
+    engineer_topological_features,
+    remap_nodes,
+)
 
 
 class TestPipeline(unittest.TestCase):
@@ -58,7 +62,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(edges_df.iloc[0]["target_idx"], 1)
 
     def test_engineer_topological_features(self):
-        id_to_idx, merged_df, edges_df = remap_nodes(
+        _id_to_idx, merged_df, edges_df = remap_nodes(
             self.features_df, self.classes_df, self.edges_df
         )
         topo_df = engineer_topological_features(edges_df, len(merged_df))
@@ -79,7 +83,7 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(topo_df.loc[1, "out_degree"], 1)
 
     def test_create_pyg_data(self):
-        id_to_idx, merged_df, edges_df = remap_nodes(
+        _id_to_idx, merged_df, edges_df = remap_nodes(
             self.features_df, self.classes_df, self.edges_df
         )
         topo_df = engineer_topological_features(edges_df, len(merged_df))

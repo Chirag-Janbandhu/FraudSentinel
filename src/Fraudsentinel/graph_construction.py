@@ -6,7 +6,6 @@ temporal train/val/test splitting, and saving PyG Data objects.
 """
 
 from pathlib import Path
-from typing import Dict, Tuple, Union
 
 import networkx as nx
 import numpy as np
@@ -25,7 +24,7 @@ except ImportError:
 logger = get_logger("FraudSentinel.GraphConstruction")
 
 
-def load_raw_data(data_dir: Union[str, Path]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_raw_data(data_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
    
     data_dir = Path(data_dir)
     features_file = data_dir / "elliptic_txs_features.csv"
@@ -51,7 +50,7 @@ def remap_nodes(
     features_df: pd.DataFrame,
     classes_df: pd.DataFrame,
     edges_df: pd.DataFrame
-) -> Tuple[Dict[int, int], pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict[int, int], pd.DataFrame, pd.DataFrame]:
     """
     Remaps non-sequential Bitcoin transaction IDs to 0..N-1 sequential node indices.
     
@@ -200,7 +199,6 @@ def create_pyg_data(
     """
     logger.info("Assembling PyTorch Geometric Data object...")
 
-    num_nodes = len(merged_df)
 
     # --- Raw node features ---
     raw_feature_cols = [f"feature_{i}" for i in range(1, 166)]
@@ -267,8 +265,8 @@ def create_pyg_data(
 
 
 def build_and_save_graph(
-    data_dir: Union[str, Path] = "data/raw/archive/elliptic_bitcoin_dataset",
-    output_path: Union[str, Path] = "data/processed/graph_data.pt"
+    data_dir: str | Path = "data/raw/archive/elliptic_bitcoin_dataset",
+    output_path: str | Path = "data/processed/graph_data.pt"
 ) -> Data:
     """
     Executes end-to-end graph construction and saves the PyG Data object.
@@ -279,7 +277,7 @@ def build_and_save_graph(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     features_df, classes_df, edges_df = load_raw_data(data_dir)
-    id_to_idx, merged_df, edges_df = remap_nodes(features_df, classes_df, edges_df)
+    _id_to_idx, merged_df, edges_df = remap_nodes(features_df, classes_df, edges_df)
     topo_df = engineer_topological_features(edges_df, len(merged_df))
     graph_data = create_pyg_data(merged_df, edges_df, topo_df)
     

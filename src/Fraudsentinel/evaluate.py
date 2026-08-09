@@ -22,26 +22,32 @@ Why F1-illicit and not accuracy?
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Literal
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-import matplotlib.pyplot as plt
-import matplotlib
+
 matplotlib.use("Agg")   # headless — no display needed
 
 from sklearn.metrics import (
+    average_precision_score,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
-    average_precision_score,
-    precision_recall_curve,
 )
 from torch_geometric.data import Data
 
 from Fraudsentinel.logger import get_logger
-from Fraudsentinel.models import XGBoostFraudClassifier, GraphSAGEClassifier, GCNClassifier, GATClassifier
+from Fraudsentinel.models import (
+    GATClassifier,
+    GCNClassifier,
+    GraphSAGEClassifier,
+    XGBoostFraudClassifier,
+)
 
 logger = get_logger("FraudSentinel.Evaluate")
 
@@ -55,7 +61,7 @@ def evaluate_model(
     model_type: Literal["xgboost", "graphsage", "gcn", "gat"],
     device: str | None = None,
     threshold: float | None = None,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Evaluate a model on the nodes selected by `mask`.
 
@@ -127,10 +133,10 @@ def evaluate_model(
 # ── Comparison table ──────────────────────────────────────────────────────────
 
 def compare_models(
-    xgb_metrics: Dict,
-    sage_metrics: Dict,
-    gcn_metrics: Dict,
-    gat_metrics: Dict,
+    xgb_metrics: dict,
+    sage_metrics: dict,
+    gcn_metrics: dict,
+    gat_metrics: dict,
     split_name: str = "Test",
 ) -> pd.DataFrame:
     """
@@ -168,10 +174,10 @@ def compare_models(
 # ── PR curve plot ─────────────────────────────────────────────────────────────
 
 def plot_pr_curves(
-    xgb_metrics: Dict,
-    sage_metrics: Dict,
-    gcn_metrics: Dict,
-    gat_metrics: Dict,
+    xgb_metrics: dict,
+    sage_metrics: dict,
+    gcn_metrics: dict,
+    gat_metrics: dict,
     save_path: str | Path = "reports/figures/pr_curves.png",
     split_name: str = "Validation",
 ) -> None:

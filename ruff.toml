@@ -1,0 +1,5 @@
+[lint]
+# N999: package name 'Fraudsentinel' uses mixed case — suppressed because
+# renaming the installed package directory is a breaking change across all
+# imports. All other ruff rules apply normally.
+ignore = ["N999"]
