@@ -18,15 +18,15 @@ from Fraudsentinel.graph_construction import (
 class TestPipeline(unittest.TestCase):
     def setUp(self):
         # Create a tiny mock dataset: 4 nodes, 3 edges, 2 timesteps
-        self.features_df = pd.DataFrame({
+        feat_dict = {
             "txId": [1001, 1002, 1003, 1004],
             "time_step": [1, 1, 2, 2],
             "feature_1": [0.1, 0.2, 0.3, 0.4],
-            "feature_2": [-0.5, 0.5, -0.2, 0.8]
-        })
-        # Mock feature columns up to 165
+            "feature_2": [-0.5, 0.5, -0.2, 0.8],
+        }
         for i in range(3, 166):
-            self.features_df[f"feature_{i}"] = np.random.randn(4).astype(np.float32)
+            feat_dict[f"feature_{i}"] = np.random.randn(4).astype(np.float32)
+        self.features_df = pd.DataFrame(feat_dict)
 
         self.classes_df = pd.DataFrame({
             "txId": [1001, 1002, 1003, 1004],
