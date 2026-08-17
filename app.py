@@ -17,7 +17,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import torch
-from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.data import Data
+from torch_geometric.utils import k_hop_subgraph, to_undirected
 
 from Fraudsentinel.logger import get_logger
 from Fraudsentinel.models import XGBoostFraudClassifier
@@ -99,23 +100,87 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def generate_demo_graph_data(output_path: Path) -> Data:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    num_nodes = 5000
+    num_edges = 12000
+
+    np.random.seed(42)
+    torch.manual_seed(42)
+
+    x = torch.randn((num_nodes, 170), dtype=torch.float)
+    x[:, 165] = torch.tensor(np.random.poisson(3, num_nodes), dtype=torch.float)
+    x[:, 166] = torch.tensor(np.random.poisson(3, num_nodes), dtype=torch.float)
+    x[:, 167] = x[:, 165] + x[:, 166]
+    x[:, 168] = torch.tensor(np.random.exponential(1e-4, num_nodes), dtype=torch.float)
+    x[:, 169] = torch.tensor(np.random.uniform(0.001, 0.05, num_nodes), dtype=torch.float)
+
+    y_raw = np.random.choice([0, 1, -1], size=num_nodes, p=[0.75, 0.10, 0.15])
+    y = torch.tensor(y_raw, dtype=torch.long)
+
+    time_steps = torch.tensor(np.random.randint(1, 50, size=num_nodes), dtype=torch.long)
+
+    src = np.random.randint(0, num_nodes, size=num_edges)
+    dst = np.random.randint(0, num_nodes, size=num_edges)
+    edge_index = to_undirected(torch.tensor(np.vstack([src, dst]), dtype=torch.long))
+
+    train_mask = (time_steps >= 1) & (time_steps <= 34)
+    val_mask = (time_steps >= 35) & (time_steps <= 42)
+    test_mask = (time_steps >= 43) & (time_steps <= 49)
+    labeled_mask = (y != -1)
+
+    data = Data(
+        x=x,
+        edge_index=edge_index,
+        y=y,
+        time_step=time_steps,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        labeled_mask=labeled_mask,
+    )
+    torch.save(data, output_path)
+    return data
+
+
 @st.cache_resource
 def load_graph_data():
     data_path = Path("data/processed/graph_data.pt")
-    if not data_path.exists():
-        st.error(f"Graph data file not found at {data_path}. Run graph construction pipeline first.")
-        st.stop()
-    data = torch.load(data_path, weights_only=False)
+    raw_data_dir = Path("data/raw")
+
+    if data_path.exists():
+        data = torch.load(data_path, weights_only=False)
+        return data
+
+    if (raw_data_dir / "elliptic_txs_features.csv").exists():
+        from Fraudsentinel.graph_construction import run_pipeline
+        st.info("Building PyTorch Geometric graph data from raw CSVs...")
+        data = run_pipeline(raw_data_dir, data_path)
+        return data
+
+    st.info("ℹ️ Running in Demo Mode: Synthetic Elliptic graph data loaded. Place raw Kaggle CSVs in data/raw/ for full 203,769-node dataset.")
+    data = generate_demo_graph_data(data_path)
     return data
 
+
 @st.cache_resource
-def load_xgb_model():
+def load_xgb_model(_data: Data):
     model_path = Path("models/xgboost_baseline.json")
-    if not model_path.exists():
-        return None
     model = XGBoostFraudClassifier()
-    model.load(model_path)
+    if model_path.exists():
+        model.load(model_path)
+        return model
+
+    train_mask = _data.train_mask & _data.labeled_mask
+    val_mask = _data.val_mask & _data.labeled_mask
+    X_tr = _data.x[train_mask].cpu().numpy()
+    y_tr = _data.y[train_mask].cpu().numpy()
+    X_va = _data.x[val_mask].cpu().numpy()
+    y_va = _data.y[val_mask].cpu().numpy()
+    model.fit(X_tr, y_tr, X_val=X_va, y_val=y_va, early_stopping_rounds=5)
+    model.save(model_path)
     return model
+
 
 @st.cache_data
 def get_node_metadata(_data):
@@ -139,9 +204,10 @@ def get_node_metadata(_data):
     })
     return df
 
+
 with st.spinner("Loading Elliptic Bitcoin Graph & Model Weights..."):
     data = load_graph_data()
-    xgb_model = load_xgb_model()
+    xgb_model = load_xgb_model(data)
     node_df = get_node_metadata(data)
 
 st.sidebar.image("https://img.icons8.com/color/96/shield.png", width=60)
@@ -176,10 +242,10 @@ if navigation == "📊 Executive Overview & Leaderboard":
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown("""
+        st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">Graph Nodes</div>
-            <div class="metric-value">203,769</div>
+            <div class="metric-value">{data.num_nodes:,}</div>
             <div style="font-size:0.8rem; color:#94A3B8;">49 Temporal Subgraphs</div>
         </div>
         """, unsafe_allow_html=True)
@@ -300,9 +366,11 @@ elif navigation == "🌐 Transaction Network Explorer":
 
     selected_case = st.selectbox("Select Case Study Node", list(case_studies.keys()))
     if selected_case == "Custom Node Index":
-        target_node = st.number_input("Enter Target Node Index (0 to 203,768)", 0, len(data.y) - 1, 0)
+        target_node = st.number_input(f"Enter Target Node Index (0 to {len(data.y) - 1})", 0, len(data.y) - 1, 0)
     else:
         target_node = case_studies[selected_case]
+        if target_node >= len(data.y):
+            target_node = 0
 
     node_tensor = torch.tensor([target_node], dtype=torch.long)
     subset, edge_index_sub, mapping, edge_mask_sub = k_hop_subgraph(
@@ -415,7 +483,7 @@ elif navigation == "🔍 Live Predictor & Feature Importance":
     st.markdown('<div class="main-title">🔍 Live Fraud Predictor</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Run real-time inference on any transaction node and analyze feature attributions.</div>', unsafe_allow_html=True)
 
-    sample_node = st.number_input("Enter Transaction Node Index to Inspect", 0, len(data.y) - 1, 300)
+    sample_node = st.number_input(f"Enter Transaction Node Index to Inspect (0 to {len(data.y) - 1})", 0, len(data.y) - 1, 300 if len(data.y) > 300 else 0)
 
     X_sample = data.x[sample_node:sample_node+1].cpu().numpy()
     y_true_sample = int(data.y[sample_node].item())
