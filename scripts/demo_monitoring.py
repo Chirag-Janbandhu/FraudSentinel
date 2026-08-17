@@ -1,13 +1,5 @@
 """
-demo_monitoring.py — Lightweight Inference Monitoring Demo
-============================================================
-
-Demonstrates FraudSentinel's prediction logging and probability shift monitoring:
-  1. Loads processed graph data and saved XGBoost model.
-  2. Logs validation set predictions as reference baseline (`log_prediction_batch`).
-  3. Logs test set predictions (`log_prediction_batch`).
-  4. Runs `check_probability_shift` comparing test probability distribution against
-     val baseline, demonstrating that a drift warning is automatically triggered.
+demo_monitoring.py — Inference Monitoring Demo for FraudSentinel.
 """
 
 from __future__ import annotations
@@ -15,7 +7,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Make src/ importable when running as a script
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch
@@ -32,10 +23,10 @@ def main() -> None:
     model_path = Path("models/xgboost_baseline.json")
 
     if not data_path.exists():
-        logger.error(f"Graph data not found at {data_path}. Run graph_construction.py first.")
+        logger.error(f"Graph data not found at {data_path}.")
         sys.exit(1)
     if not model_path.exists():
-        logger.error(f"XGBoost model not found at {model_path}. Run run_training.py first.")
+        logger.error(f"XGBoost model not found at {model_path}.")
         sys.exit(1)
 
     logger.info(f"Loading graph data from {data_path} ...")
@@ -45,7 +36,6 @@ def main() -> None:
     model = XGBoostFraudClassifier()
     model.load(model_path)
 
-    # Convert node features to numpy for XGBoost
     X_val = data.x[data.val_mask].cpu().numpy()
     y_val = data.y[data.val_mask].cpu().numpy()
 
@@ -58,36 +48,34 @@ def main() -> None:
     logger.info("Computing predictions for Test set (Current Batch) ...")
     test_probas = model.predict_proba(X_test)
 
-    # 1. Log validation batch (reference)
-    logger.info("Logging Validation predictions ...")
-    log_prediction_batch(
+    log_path = Path("reports/prediction_log.csv")
+
+    val_record = log_prediction_batch(
         probas=val_probas,
         y_true=y_val,
-        batch_id="val_reference_split",
-        save_path="reports/prediction_log.csv",
+        batch_id="val_split_reference",
+        eval_threshold=0.5,
+        save_path=log_path,
     )
 
-    # 2. Log test batch (production test period)
-    logger.info("Logging Test predictions ...")
-    log_prediction_batch(
+    test_record = log_prediction_batch(
         probas=test_probas,
         y_true=y_test,
-        batch_id="test_t43_t49_split",
-        save_path="reports/prediction_log.csv",
+        batch_id="test_split_batch",
+        eval_threshold=0.5,
+        save_path=log_path,
     )
 
-    # 3. Check for output probability shift
-    logger.info("Checking for output probability shift (Val vs Test) ...")
-    is_drifted = check_probability_shift(
-        current_probas=test_probas,
-        reference_probas=val_probas,
-        threshold=0.05,
+    val_mean_proba = float(val_record["mean_proba"])
+
+    shifted, delta = check_probability_shift(
+        probas=test_probas,
+        ref_mean=val_mean_proba,
+        threshold_delta=0.10,
+        batch_id="test_split_batch",
     )
 
-    if is_drifted:
-        logger.info("[SUCCESS] Monitoring hook successfully caught the val-to-test probability shift!")
-    else:
-        logger.info("[NOTE] No probability shift detected.")
+    logger.info(f"Monitoring demo completed successfully. Log saved to {log_path}")
 
 
 if __name__ == "__main__":

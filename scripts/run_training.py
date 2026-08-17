@@ -1,26 +1,7 @@
 """
 FraudSentinel Training Entry Point
 ====================================
-Usage
------
-    # Train all models (XGBoost → GraphSAGE → GCN → GAT → comparison):
-    py scripts/run_training.py
-
-    # Train only GCN:
-    py scripts/run_training.py --model gcn
-
-    # Train only GAT:
-    py scripts/run_training.py --model gat
-
-Output
-------
-    models/xgboost_baseline.json     — serialised XGBoost model
-    models/graphsage_best.pt         — best GraphSAGE checkpoint
-    models/gcn_best.pt               — best GCN checkpoint
-    models/gat_best.pt               — best GAT checkpoint
-    reports/figures/pr_curves_val.png — overlaid PR curves (val split)
-    reports/figures/pr_curves_test.png - overlaid PR curves (test split)
-    logs/training_<date>.log         — full training log
+Trains XGBoost, GraphSAGE, GCN, and GAT models on graph data.
 """
 
 from __future__ import annotations
@@ -30,20 +11,19 @@ import json
 import sys
 from pathlib import Path
 
-# Make src/ importable when running as a script
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch
 
+from Fraudsentinel.evaluate import evaluate_model, plot_pr_curves
 from Fraudsentinel.logger import get_logger
 from Fraudsentinel.train import (
-    train_xgboost,
-    train_graphsage,
-    train_gcn,
-    train_gat,
     DEFAULT_CFG,
+    train_gat,
+    train_gcn,
+    train_graphsage,
+    train_xgboost,
 )
-from Fraudsentinel.evaluate import evaluate_model, compare_models, plot_pr_curves
 
 logger = get_logger("FraudSentinel.RunTraining")
 
@@ -65,8 +45,8 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save model artifacts"
     )
     parser.add_argument(
-        "--epochs", type=int, default=None,
-        help="Override GraphSAGE/GCN/GAT max epochs"
+        "--output-dir", default="reports/figures",
+        help="Directory to save plots and reports"
     )
     parser.add_argument(
         "--device", default=None,
@@ -75,207 +55,91 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_best_params(model_dir: Path, model_name: str) -> dict | None:
+    params_file = model_dir / f"{model_name}_best_params.json"
+    if params_file.exists():
+        logger.info(f"Loading tuned hyperparameters from {params_file}...")
+        with open(params_file) as f:
+            return json.load(f)
+    return None
+
+
 def main() -> None:
     args = parse_args()
-
-    # ── Load graph data ──────────────────────────────────────────────────
     data_path = Path(args.data_path)
+    model_dir = Path(args.model_dir)
+    output_dir = Path(args.output_dir)
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if not data_path.exists():
-        logger.error(
-            f"Graph data not found at {data_path}. "
-            "Run graph_construction.py first."
-        )
+        logger.error(f"Data file not found at '{data_path}'. Run graph construction script first.")
         sys.exit(1)
 
-    logger.info(f"Loading graph data from {data_path} ...")
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Loading graph data from '{data_path}'...")
     data = torch.load(data_path, weights_only=False)
-    logger.info(
-        f"Graph loaded: {data.num_nodes} nodes | "
-        f"{data.num_edges} edges | "
-        f"{data.num_node_features} features"
-    )
-    logger.info(
-        f"Labeled splits — "
-        f"Train: {(data.train_mask & data.labeled_mask).sum().item()} | "
-        f"Val: {(data.val_mask & data.labeled_mask).sum().item()} | "
-        f"Test: {(data.test_mask & data.labeled_mask).sum().item()}"
-    )
 
-    # ── Build configs ────────────────────────────────────────────────────
-    epochs_override = args.epochs
+    run_all = args.model == "all"
+    metrics_cache = {}
 
-    xgb_model  = None
-    sage_model = None
-    gcn_model  = None
-    gat_model  = None
+    if run_all or args.model == "xgboost":
+        logger.info("Training XGBoost baseline...")
+        xgb_cfg = DEFAULT_CFG["xgb"].copy()
+        xgb_cfg["save_path"] = str(model_dir / "xgboost_baseline.json")
+        xgb_model = train_xgboost(data, cfg=xgb_cfg)
 
-    xgb_val_metrics  = None
-    sage_val_metrics = None
-    gcn_val_metrics  = None
-    gat_val_metrics  = None
+        metrics_cache["xgb_val"] = evaluate_model(xgb_model, data, data.val_mask, split_name="val")
+        metrics_cache["xgb_test"] = evaluate_model(xgb_model, data, data.test_mask, split_name="test")
 
-    # ── XGBoost ──────────────────────────────────────────────────────────
-    if args.model in ("xgboost", "all"):
-        xgb_model = train_xgboost(
-            data,
-            cfg=DEFAULT_CFG["xgb"],
-            model_dir=args.model_dir,
-        )
-
-        val_mask_labeled = data.val_mask & data.labeled_mask
-        xgb_val_metrics = evaluate_model(
-            xgb_model, data, val_mask_labeled,
-            model_type="xgboost",
-        )
-        logger.info(f"XGBoost | Val F1={xgb_val_metrics['f1']:.4f}")
-
-    # ── GraphSAGE ────────────────────────────────────────────────────────
-    if args.model in ("graphsage", "all"):
+    if run_all or args.model == "graphsage":
+        logger.info("Training GraphSAGE...")
         sage_cfg = DEFAULT_CFG["sage"].copy()
-        best_params_path = Path(args.model_dir) / "graphsage_best_params.json"
-        if best_params_path.exists():
-            with open(best_params_path, "r") as f:
-                best_params = json.load(f)
-            logger.info(f"Loading optimized GraphSAGE parameters: {best_params}")
-            sage_cfg.update(best_params)
-        if epochs_override is not None:
-            sage_cfg["epochs"] = epochs_override
-        sage_model = train_graphsage(
-            data,
-            cfg=sage_cfg,
-            model_dir=args.model_dir,
-            device=args.device,
-        )
+        sage_cfg["save_path"] = str(model_dir / "graphsage_best.pt")
+        sage_cfg["scaler_path"] = str(model_dir / "scaler.pkl")
 
-        val_mask_labeled = data.val_mask & data.labeled_mask
-        sage_val_metrics = evaluate_model(
-            sage_model, data, val_mask_labeled,
-            model_type="graphsage",
-            device=args.device,
-        )
-        logger.info(f"GraphSAGE | Val F1={sage_val_metrics['f1']:.4f}")
+        tuned = load_best_params(model_dir, "graphsage")
+        if tuned:
+            sage_cfg.update(tuned)
 
-    # ── GCN ──────────────────────────────────────────────────────────────
-    if args.model in ("gcn", "all"):
+        sage_model, scaler, _ = train_graphsage(data, cfg=sage_cfg, device=device)
+        metrics_cache["sage_val"] = evaluate_model(sage_model, data, data.val_mask, split_name="val")
+        metrics_cache["sage_test"] = evaluate_model(sage_model, data, data.test_mask, split_name="test")
+
+    if run_all or args.model == "gcn":
+        logger.info("Training GCN...")
         gcn_cfg = DEFAULT_CFG["gcn"].copy()
-        best_params_path = Path(args.model_dir) / "gcn_best_params.json"
-        if best_params_path.exists():
-            with open(best_params_path, "r") as f:
-                best_params = json.load(f)
-            logger.info(f"Loading optimized GCN parameters: {best_params}")
-            gcn_cfg.update(best_params)
-        if epochs_override is not None:
-            gcn_cfg["epochs"] = epochs_override
-        gcn_model = train_gcn(
-            data,
-            cfg=gcn_cfg,
-            model_dir=args.model_dir,
-            device=args.device,
-        )
+        gcn_cfg["save_path"] = str(model_dir / "gcn_best.pt")
+        gcn_cfg["scaler_path"] = str(model_dir / "scaler.pkl")
 
-        val_mask_labeled = data.val_mask & data.labeled_mask
-        gcn_val_metrics = evaluate_model(
-            gcn_model, data, val_mask_labeled,
-            model_type="gcn",
-            device=args.device,
-        )
-        logger.info(f"GCN | Val F1={gcn_val_metrics['f1']:.4f}")
+        tuned = load_best_params(model_dir, "gcn")
+        if tuned:
+            gcn_cfg.update(tuned)
 
-    # ── GAT ──────────────────────────────────────────────────────────────
-    if args.model in ("gat", "all"):
+        gcn_model, _, _ = train_gcn(data, cfg=gcn_cfg, device=device)
+        metrics_cache["gcn_val"] = evaluate_model(gcn_model, data, data.val_mask, split_name="val")
+        metrics_cache["gcn_test"] = evaluate_model(gcn_model, data, data.test_mask, split_name="test")
+
+    if run_all or args.model == "gat":
+        logger.info("Training GAT...")
         gat_cfg = DEFAULT_CFG["gat"].copy()
-        best_params_path = Path(args.model_dir) / "gat_best_params.json"
-        if best_params_path.exists():
-            with open(best_params_path, "r") as f:
-                best_params = json.load(f)
-            logger.info(f"Loading optimized GAT parameters: {best_params}")
-            gat_cfg.update(best_params)
-        if epochs_override is not None:
-            gat_cfg["epochs"] = epochs_override
-        gat_model = train_gat(
-            data,
-            cfg=gat_cfg,
-            model_dir=args.model_dir,
-            device=args.device,
-        )
+        gat_cfg["save_path"] = str(model_dir / "gat_best.pt")
+        gat_cfg["scaler_path"] = str(model_dir / "scaler.pkl")
 
-        val_mask_labeled = data.val_mask & data.labeled_mask
-        gat_val_metrics = evaluate_model(
-            gat_model, data, val_mask_labeled,
-            model_type="gat",
-            device=args.device,
-        )
-        logger.info(f"GAT | Val F1={gat_val_metrics['f1']:.4f}")
+        tuned = load_best_params(model_dir, "gat")
+        if tuned:
+            gat_cfg.update(tuned)
 
-    # ── Comparison + PR curves (only if all four were trained) ───────────
-    if xgb_val_metrics and sage_val_metrics and gcn_val_metrics and gat_val_metrics:
-        logger.info("\n" + "=" * 60)
-        logger.info("VALIDATION SPLIT — MODEL COMPARISON")
-        logger.info("=" * 60)
-        comparison_df = compare_models(
-            xgb_val_metrics, sage_val_metrics, gcn_val_metrics, gat_val_metrics, "Validation"
-        )
-        print("\n" + comparison_df.to_string() + "\n")
+        gat_model, _, _ = train_gat(data, cfg=gat_cfg, device=device)
+        metrics_cache["gat_val"] = evaluate_model(gat_model, data, data.val_mask, split_name="val")
+        metrics_cache["gat_test"] = evaluate_model(gat_model, data, data.test_mask, split_name="test")
 
-        plot_pr_curves(
-            xgb_val_metrics,
-            sage_val_metrics,
-            gcn_val_metrics,
-            gat_val_metrics,
-            save_path="reports/figures/pr_curves_val.png",
-            split_name="Validation",
-        )
+    if "xgb_val" in metrics_cache and "sage_val" in metrics_cache:
+        plot_pr_curves(metrics_cache["xgb_val"], metrics_cache["sage_val"], output_dir / "pr_curves_val.png", gnn_name="GraphSAGE")
+        plot_pr_curves(metrics_cache["xgb_test"], metrics_cache["sage_test"], output_dir / "pr_curves_test.png", gnn_name="GraphSAGE")
 
-        # ── Test set evaluation (threshold from val, locked) ──
-        logger.info("\n" + "=" * 60)
-        logger.info("TEST SPLIT — FINAL NUMBERS (threshold locked from val)")
-        logger.info("=" * 60)
-
-        test_mask_labeled = data.test_mask & data.labeled_mask
-        
-        xgb_test_metrics = evaluate_model(
-            xgb_model, data, test_mask_labeled,
-            model_type="xgboost",
-            threshold=xgb_val_metrics["threshold"],
-        )
-        sage_test_metrics = evaluate_model(
-            sage_model, data, test_mask_labeled,
-            model_type="graphsage",
-            device=args.device,
-            threshold=sage_val_metrics["threshold"],
-        )
-        gcn_test_metrics = evaluate_model(
-            gcn_model, data, test_mask_labeled,
-            model_type="gcn",
-            device=args.device,
-            threshold=gcn_val_metrics["threshold"],
-        )
-        gat_test_metrics = evaluate_model(
-            gat_model, data, test_mask_labeled,
-            model_type="gat",
-            device=args.device,
-            threshold=gat_val_metrics["threshold"],
-        )
-
-        test_comparison = compare_models(
-            xgb_test_metrics, sage_test_metrics, gcn_test_metrics, gat_test_metrics, "Test"
-        )
-        print("\n" + "=" * 60)
-        print("TEST SET RESULTS")
-        print("=" * 60)
-        print(test_comparison.to_string())
-        print()
-
-        plot_pr_curves(
-            xgb_test_metrics,
-            sage_test_metrics,
-            gcn_test_metrics,
-            gat_test_metrics,
-            save_path="reports/figures/pr_curves_test.png",
-            split_name="Test",
-        )
-
-    logger.info("run_training.py complete.")
+    logger.info("Training pipeline complete.")
 
 
 if __name__ == "__main__":

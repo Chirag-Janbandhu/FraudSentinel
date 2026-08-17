@@ -1,24 +1,6 @@
 """
 Model architectures for FraudSentinel.
-
-XGBoostFraudClassifier
-    Thin, serialisable wrapper around xgboost.XGBClassifier.
-    Auto-computes scale_pos_weight from the training label distribution
-    so the model is class-imbalance-aware out of the box.
-
-GraphSAGEClassifier
-    3-layer inductive GNN using PyG SAGEConv operators.
-    Designed to be trained via NeighborLoader (mini-batch, scalable).
-    BatchNorm + Dropout between layers; single logit output for
-    BCEWithLogitsLoss (binary fraud / not-fraud).
-
-Design note on class imbalance
-    The Elliptic dataset is ~10 % illicit / 90 % licit.
-    Both models handle this natively:
-      - XGBoost : scale_pos_weight = n_licit / n_illicit
-      - GraphSAGE : pos_weight tensor in BCEWithLogitsLoss
-    We do NOT oversample/undersample because the temporal split must
-    be kept intact to avoid data leakage.
+Contains XGBoostFraudClassifier, GraphSAGEClassifier, GCNClassifier, and GATClassifier.
 """
 
 from __future__ import annotations
@@ -36,413 +18,281 @@ from Fraudsentinel.logger import get_logger
 logger = get_logger("FraudSentinel.Models")
 
 
-# ---------------------------------------------------------------------------
-# XGBoost Baseline
-# ---------------------------------------------------------------------------
-
 class XGBoostFraudClassifier:
-    """
-    Wrapper around xgboost.XGBClassifier for illicit-transaction detection.
-
-    Why XGBoost as baseline?
-        It operates on node features alone (no graph structure), so any
-        improvement from GraphSAGE directly measures the value of
-        neighbourhood information.
-
-    Parameters
-    ----------
-    n_estimators : int
-        Maximum number of boosting rounds (early stopping may reduce this).
-    max_depth : int
-        Maximum tree depth. 6 is a sensible default for tabular fraud data.
-    learning_rate : float
-        Shrinkage rate per boosting step.
-    subsample : float
-        Row subsampling ratio per tree.
-    colsample_bytree : float
-        Feature subsampling ratio per tree.
-    early_stopping_rounds : int
-        Stop if val metric does not improve for this many rounds.
-    random_state : int
-        Seed for reproducibility.
-    """
+    """Wrapper around xgboost.XGBClassifier for illicit-transaction detection."""
 
     def __init__(
         self,
-        n_estimators: int = 500,
+        n_estimators: int = 200,
         max_depth: int = 6,
         learning_rate: float = 0.05,
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
-        early_stopping_rounds: int = 20,
         random_state: int = 42,
-    ):
-        try:
-            import xgboost as xgb  # local import keeps the rest importable without xgb
-            self._xgb = xgb
-        except ImportError:
-            raise ImportError("xgboost is not installed. Run: pip install xgboost")
-
+        use_class_weights: bool = True,
+    ) -> None:
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
         self.subsample = subsample
         self.colsample_bytree = colsample_bytree
-        self.early_stopping_rounds = early_stopping_rounds
         self.random_state = random_state
-        self.model: object | None = None
-        self.scale_pos_weight: float | None = None
-
-    # ------------------------------------------------------------------
-    # Fit
-    # ------------------------------------------------------------------
+        self.use_class_weights = use_class_weights
+        self._model = None
+        self._scale_pos_weight = 1.0
 
     def fit(
         self,
         X_train: np.ndarray,
         y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
+        X_val: np.ndarray | None = None,
+        y_val: np.ndarray | None = None,
+        early_stopping_rounds: int = 20,
     ) -> XGBoostFraudClassifier:
-        """
-        Train the XGBoost classifier.
+        """Fit the XGBoost classifier with early stopping on validation data."""
+        try:
+            import xgboost as xgb
+        except ImportError as err:
+            raise ImportError(
+                "xgboost is required for XGBoostFraudClassifier. Install via: pip install xgboost"
+            ) from err
 
-        scale_pos_weight is derived from the training set so the model
-        never sees validation label statistics.
-        """
-        n_licit = int((y_train == 0).sum())
-        n_illicit = int((y_train == 1).sum())
-        self.scale_pos_weight = n_licit / max(n_illicit, 1)
+        if self.use_class_weights:
+            n_illicit = int((y_train == 1).sum())
+            n_licit = int((y_train == 0).sum())
+            if n_illicit > 0:
+                self._scale_pos_weight = float(n_licit) / float(n_illicit)
+                logger.info(
+                    f"Computed scale_pos_weight = {self._scale_pos_weight:.2f} "
+                    f"({n_licit} licit / {n_illicit} illicit)"
+                )
+            else:
+                self._scale_pos_weight = 1.0
 
-        logger.info(
-            f"XGBoost | train size={len(y_train)} "
-            f"(illicit={n_illicit}, licit={n_licit}) | "
-            f"scale_pos_weight={self.scale_pos_weight:.2f}"
-        )
-
-        self.model = self._xgb.XGBClassifier(
+        self._model = xgb.XGBClassifier(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
             learning_rate=self.learning_rate,
             subsample=self.subsample,
             colsample_bytree=self.colsample_bytree,
-            scale_pos_weight=self.scale_pos_weight,
-            early_stopping_rounds=self.early_stopping_rounds,
-            eval_metric="aucpr",          # PR-AUC on val — matches our primary concern
+            scale_pos_weight=self._scale_pos_weight,
             random_state=self.random_state,
-            tree_method="hist",           # fast CPU training
-            verbosity=0,
-            use_label_encoder=False,
+            eval_metric="logloss",
+            n_jobs=-1,
         )
 
-        self.model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
+        eval_set = [(X_train, y_train)]
+        if X_val is not None and y_val is not None:
+            eval_set.append((X_val, y_val))
+
+        logger.info(
+            f"Training XGBoost baseline on {X_train.shape[0]:,} samples "
+            f"({X_train.shape[1]} features)..."
+        )
+        self._model.fit(
+            X_train,
+            y_train,
+            eval_set=eval_set,
             verbose=False,
         )
-
-        best_round = self.model.best_iteration
-        logger.info(f"XGBoost | best iteration={best_round}")
+        logger.info(f"XGBoost training complete. Best iteration: {self._model.best_iteration}")
         return self
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Return probability of illicit class (class=1) for each node."""
-        if self.model is None:
-            raise RuntimeError("Model not fitted yet. Call .fit() first.")
-        return self.model.predict_proba(X)[:, 1]
+        """Returns 1-D array of predicted probabilities for the positive class."""
+        if self._model is None:
+            raise RuntimeError("Model is not fitted yet. Call fit() first.")
+        return self._model.predict_proba(X)[:, 1]
 
     def predict(self, X: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+        """Returns 1-D array of binary predictions [0, 1] using custom threshold."""
         return (self.predict_proba(X) >= threshold).astype(int)
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
     def save(self, path: str | Path) -> None:
+        """Serialize model to JSON format."""
+        if self._model is None:
+            raise RuntimeError("Cannot save an unfitted model.")
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.model.save_model(str(path))
-        logger.info(f"XGBoost model saved to {path}")
+        self._model.save_model(str(path))
+        logger.info(f"Saved XGBoost model to {path}")
 
     def load(self, path: str | Path) -> XGBoostFraudClassifier:
+        """Load model weights from JSON file."""
+        import xgboost as xgb
         path = Path(path)
-        self.model = self._xgb.XGBClassifier()
-        self.model.load_model(str(path))
-        logger.info(f"XGBoost model loaded from {path}")
+        self._model = xgb.XGBClassifier()
+        self._model.load_model(str(path))
+        logger.info(f"Loaded XGBoost model from {path}")
         return self
 
 
-# ---------------------------------------------------------------------------
-# GraphSAGE Classifier
-# ---------------------------------------------------------------------------
-
 class GraphSAGEClassifier(nn.Module):
-    """
-    3-layer GraphSAGE for binary node classification (illicit / licit).
-
-    Architecture
-    ------------
-    Input  : [num_nodes, in_channels]          (170 features per node)
-    Layer 1: SAGEConv(in -> hidden[0], aggr=max) + BatchNorm + ReLU + Dropout
-    Layer 2: SAGEConv(hidden[0] -> hidden[1], aggr=max) + BatchNorm + ReLU + Dropout
-    Head   : Linear(hidden[-1] -> 1)  -- raw logit for BCEWithLogitsLoss
-
-    Why SAGEConv with max aggregation?
-        Inductive -- generalises to unseen nodes without retraining.
-        max aggregation preserves the strongest fraud signal from any
-        neighbour in the receptive field. mean aggregation averages the
-        signal over many licit neighbours, diluting the illicit indicator.
-        For fraud/anomaly detection, max is the principled choice.
-
-    Why 2 layers?
-        2 hops covers the immediate transaction counterparties of each
-        node. 3+ hops aggregate from distant nodes whose transactions
-        are likely unrelated to the local fraud pattern, adding noise.
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input node features (170 for this dataset).
-    hidden_channels : list[int]
-        Width of each SAGEConv layer. Default [256, 128] (2 layers).
-    dropout : float
-        Dropout probability applied after each hidden layer.
-    aggr : str
-        Neighborhood aggregation method. Default "max".
-        "max" is preferred for fraud detection -- it preserves the strongest
-        illicit signal from any single neighbor, rather than averaging it
-        over the (mostly licit) neighborhood.
-    """
+    """Multi-layer GraphSAGE classifier for node-level fraud detection."""
 
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: list[int] | None = None,
-        dropout: float = 0.3,
+        in_channels: int = 170,
+        hidden_channels: int = 128,
+        out_channels: int = 1,
+        num_layers: int = 2,
+        dropout: float = 0.2,
         aggr: str = "max",
-    ):
+    ) -> None:
         super().__init__()
-
-        if hidden_channels is None:
-            hidden_channels = [256, 128]
-
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.num_layers = num_layers
         self.dropout = dropout
-        dims = [in_channels] + hidden_channels
 
         self.convs = nn.ModuleList()
-        self.bns = nn.ModuleList()  # kept name self.bns for minimal diff in forward()
-        for i in range(len(dims) - 1):
-            self.convs.append(SAGEConv(dims[i], dims[i + 1], aggr=aggr))
-            self.bns.append(nn.LayerNorm(dims[i + 1]))
+        self.norms = nn.ModuleList()
 
-        self.head = nn.Linear(hidden_channels[-1], 1)
+        if num_layers == 1:
+            self.convs.append(SAGEConv(in_channels, out_channels, aggr=aggr))
+        else:
+            self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
+            self.norms.append(nn.LayerNorm(hidden_channels))
 
-        self.reset_parameters()
-        logger.info(
-            f"GraphSAGEClassifier | in={in_channels} | "
-            f"hidden={hidden_channels} | dropout={dropout} | aggr={aggr}"
-        )
+            for _ in range(num_layers - 2):
+                self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
+                self.norms.append(nn.LayerNorm(hidden_channels))
+
+            self.convs.append(SAGEConv(hidden_channels, out_channels, aggr=aggr))
 
     def reset_parameters(self) -> None:
-        """Xavier initialisation for reproducible experiments."""
+        """Re-initializes all learnable parameters in convolution layers."""
         for conv in self.convs:
             conv.reset_parameters()
-        for bn in self.bns:
-            if hasattr(bn, 'reset_parameters'):
-                bn.reset_parameters()
-            else:
-                nn.init.ones_(bn.weight)
-                nn.init.zeros_(bn.bias)
-        nn.init.xavier_uniform_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        """
-        Forward pass.
-
-        Parameters
-        ----------
-        x : Tensor [N, in_channels]
-        edge_index : Tensor [2, E]
-
-        Returns
-        -------
-        Tensor [N, 1]  — raw logits (not probabilities)
-        """
-        for conv, bn in zip(self.convs, self.bns):
-            x = conv(x, edge_index)
-            x = bn(x)
+        """Forward pass. Returns raw logit output tensor."""
+        for i in range(self.num_layers - 1):
+            x = self.convs[i](x, edge_index)
+            x = self.norms[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        return self.head(x)   # [N, 1] raw logit
+        x = self.convs[-1](x, edge_index)
+        return x.squeeze(-1)
 
     @torch.no_grad()
-    def predict_proba(self, x: Tensor, edge_index: Tensor) -> np.ndarray:
-        """Return fraud probability in [0, 1] for each node."""
+    def predict_proba(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        """Returns 1-D tensor of predicted probabilities in range [0, 1]."""
         self.eval()
-        logits = self.forward(x, edge_index).squeeze(-1)
-        return torch.sigmoid(logits).cpu().numpy()
+        logits = self.forward(x, edge_index)
+        return torch.sigmoid(logits)
 
-
-# ---------------------------------------------------------------------------
-# GCN (Graph Convolutional Network) Classifier
-# ---------------------------------------------------------------------------
 
 class GCNClassifier(nn.Module):
-    """
-    2-layer Graph Convolutional Network (GCN) for binary node classification.
-
-    Architecture
-    ------------
-    Input  : [num_nodes, in_channels]
-    Layer 1: GCNConv(in -> hidden[0]) + BatchNorm + ReLU + Dropout
-    Layer 2: GCNConv(hidden[0] -> hidden[1]) + BatchNorm + ReLU + Dropout
-    Head   : Linear(hidden[1] -> 1)  -- raw logit out
-
-    Why GCN?
-        GCN uses symmetric normalisation to scale aggregation. It is a standard
-        isotropic baseline where each transaction counterpart of a node is
-        weighted equally, normalized by the degree of both nodes.
-    """
+    """Multi-layer Graph Convolutional Network (GCN) for node-level fraud detection."""
 
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: list[int] | None = None,
-        dropout: float = 0.3,
-    ):
+        in_channels: int = 170,
+        hidden_channels: int = 128,
+        out_channels: int = 1,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+    ) -> None:
         super().__init__()
-
-        if hidden_channels is None:
-            hidden_channels = [256, 128]
-
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.num_layers = num_layers
         self.dropout = dropout
-        dims = [in_channels] + hidden_channels
 
         self.convs = nn.ModuleList()
-        self.bns = nn.ModuleList()  # kept name self.bns for minimal diff in forward()
-        for i in range(len(dims) - 1):
-            self.convs.append(GCNConv(dims[i], dims[i + 1]))
-            self.bns.append(nn.LayerNorm(dims[i + 1]))
+        self.norms = nn.ModuleList()
 
-        self.head = nn.Linear(hidden_channels[-1], 1)
+        if num_layers == 1:
+            self.convs.append(GCNConv(in_channels, out_channels))
+        else:
+            self.convs.append(GCNConv(in_channels, hidden_channels))
+            self.norms.append(nn.LayerNorm(hidden_channels))
 
-        self.reset_parameters()
-        logger.info(
-            f"GCNClassifier | in={in_channels} | "
-            f"hidden={hidden_channels} | dropout={dropout}"
-        )
+            for _ in range(num_layers - 2):
+                self.convs.append(GCNConv(hidden_channels, hidden_channels))
+                self.norms.append(nn.LayerNorm(hidden_channels))
+
+            self.convs.append(GCNConv(hidden_channels, out_channels))
 
     def reset_parameters(self) -> None:
+        """Re-initializes all learnable parameters in convolution layers."""
         for conv in self.convs:
             conv.reset_parameters()
-        for bn in self.bns:
-            if hasattr(bn, 'reset_parameters'):
-                bn.reset_parameters()
-            else:
-                nn.init.ones_(bn.weight)
-                nn.init.zeros_(bn.bias)
-        nn.init.xavier_uniform_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        for conv, bn in zip(self.convs, self.bns):
-            x = conv(x, edge_index)
-            x = bn(x)
+        """Forward pass. Returns raw logit output tensor."""
+        for i in range(self.num_layers - 1):
+            x = self.convs[i](x, edge_index)
+            x = self.norms[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-        return self.head(x)
+
+        x = self.convs[-1](x, edge_index)
+        return x.squeeze(-1)
 
     @torch.no_grad()
-    def predict_proba(self, x: Tensor, edge_index: Tensor) -> np.ndarray:
+    def predict_proba(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        """Returns 1-D tensor of predicted probabilities in range [0, 1]."""
         self.eval()
-        logits = self.forward(x, edge_index).squeeze(-1)
-        return torch.sigmoid(logits).cpu().numpy()
+        logits = self.forward(x, edge_index)
+        return torch.sigmoid(logits)
 
-
-# ---------------------------------------------------------------------------
-# GAT (Graph Attention Network) Classifier
-# ---------------------------------------------------------------------------
 
 class GATClassifier(nn.Module):
-    """
-    2-layer Graph Attention Network (GAT) for binary node classification.
-
-    Architecture
-    ------------
-    Input  : [num_nodes, in_channels]
-    Layer 1: GATConv(in -> hidden[0], heads=4) -> Concatenated outputs (dim = hidden[0]*4)
-    Layer 2: GATConv(hidden[0]*4 -> hidden[1], heads=1) -> Output (dim = hidden[1])
-    Head   : Linear(hidden[1] -> 1)  -- raw logit out
-
-    Why GAT?
-        Financial relationships are anisotropic (direction/importance matters).
-        Transacting with a high-risk wallet should carry more weight than transacting
-        with a utility or exchange. GAT uses self-attention to learn dynamic transaction
-        coefficients, focusing attention on suspicious connections.
-    """
+    """Multi-layer Graph Attention Network (GAT) for node-level fraud detection."""
 
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: list[int] | None = None,
-        dropout: float = 0.3,
-        heads: int = 4,
-    ):
+        in_channels: int = 170,
+        hidden_channels: int = 64,
+        out_channels: int = 1,
+        num_layers: int = 2,
+        heads: int = 8,
+        dropout: float = 0.2,
+    ) -> None:
         super().__init__()
-
-        if hidden_channels is None:
-            hidden_channels = [64, 128]  # [64*4=256 out first layer, 128 out second]
-
-        self.dropout = dropout
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.num_layers = num_layers
         self.heads = heads
+        self.dropout = dropout
 
         self.convs = nn.ModuleList()
-        self.bns = nn.ModuleList()  # kept name self.bns for minimal diff in forward()
+        self.norms = nn.ModuleList()
 
-        # First layer: GATConv -> output gets concatenated from multiple heads
-        self.convs.append(GATConv(in_channels, hidden_channels[0], heads=heads, concat=True, dropout=0.2))
-        self.bns.append(nn.LayerNorm(hidden_channels[0] * heads))
+        if num_layers == 1:
+            self.convs.append(GATConv(in_channels, out_channels, heads=1, concat=False))
+        else:
+            self.convs.append(GATConv(in_channels, hidden_channels, heads=heads, concat=True))
+            self.norms.append(nn.LayerNorm(hidden_channels * heads))
 
-        # Second layer: GATConv -> single head output
-        self.convs.append(GATConv(hidden_channels[0] * heads, hidden_channels[1], heads=1, concat=False, dropout=0.2))
-        self.bns.append(nn.LayerNorm(hidden_channels[1]))
+            for _ in range(num_layers - 2):
+                self.convs.append(GATConv(hidden_channels * heads, hidden_channels, heads=heads, concat=True))
+                self.norms.append(nn.LayerNorm(hidden_channels * heads))
 
-        self.head = nn.Linear(hidden_channels[1], 1)
-
-        self.reset_parameters()
-        logger.info(
-            f"GATClassifier | in={in_channels} | "
-            f"hidden={hidden_channels} | heads={heads} | dropout={dropout}"
-        )
+            self.convs.append(GATConv(hidden_channels * heads, out_channels, heads=1, concat=False))
 
     def reset_parameters(self) -> None:
+        """Re-initializes all learnable parameters in convolution layers."""
         for conv in self.convs:
             conv.reset_parameters()
-        for bn in self.bns:
-            if hasattr(bn, 'reset_parameters'):
-                bn.reset_parameters()
-            else:
-                nn.init.ones_(bn.weight)
-                nn.init.zeros_(bn.bias)
-        nn.init.xavier_uniform_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        for conv, bn in zip(self.convs, self.bns):
-            x = conv(x, edge_index)
-            x = bn(x)
+        """Forward pass. Returns raw logit output tensor."""
+        for i in range(self.num_layers - 1):
+            x = self.convs[i](x, edge_index)
+            x = self.norms[i](x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
-        return self.head(x)
+
+        x = self.convs[-1](x, edge_index)
+        return x.squeeze(-1)
 
     @torch.no_grad()
-    def predict_proba(self, x: Tensor, edge_index: Tensor) -> np.ndarray:
+    def predict_proba(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        """Returns 1-D tensor of predicted probabilities in range [0, 1]."""
         self.eval()
-        logits = self.forward(x, edge_index).squeeze(-1)
-        return torch.sigmoid(logits).cpu().numpy()
+        logits = self.forward(x, edge_index)
+        return torch.sigmoid(logits)

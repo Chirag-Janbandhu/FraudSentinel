@@ -3,17 +3,14 @@ FraudSentinel Streamlit Web Dashboard
 ======================================
 Interactive web application for Graph Neural Network-based Bitcoin anti-money
 laundering and fraud detection on the Elliptic transaction network.
-
-Run locally:
-    streamlit run app.py
 """
 
 import sys
 from pathlib import Path
 
-# Make src/ importable
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -27,7 +24,6 @@ from Fraudsentinel.models import XGBoostFraudClassifier
 
 logger = get_logger("FraudSentinel.App")
 
-# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="FraudSentinel — GNN Bitcoin Fraud Detection",
     page_icon="🛡️",
@@ -35,7 +31,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main-title {
@@ -104,7 +99,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Data & Model Loading ──────────────────────────────────────────────────────
 @st.cache_resource
 def load_graph_data():
     data_path = Path("data/processed/graph_data.pt")
@@ -125,7 +119,6 @@ def load_xgb_model():
 
 @st.cache_data
 def get_node_metadata(_data):
-    # Pre-extract DataFrame of node indices, features, degree, and y
     y_vals = _data.y.cpu().numpy()
     timesteps = _data.time_step.cpu().numpy() if hasattr(_data, "time_step") else np.zeros(len(y_vals))
     in_deg = _data.x[:, 165].cpu().numpy()
@@ -146,14 +139,11 @@ def get_node_metadata(_data):
     })
     return df
 
-# Load core resources
 with st.spinner("Loading Elliptic Bitcoin Graph & Model Weights..."):
     data = load_graph_data()
     xgb_model = load_xgb_model()
     node_df = get_node_metadata(data)
 
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.image("https://img.icons8.com/color/96/shield.png", width=60)
 st.sidebar.title("FraudSentinel")
 st.sidebar.caption("GNN Blockchain Anti-Money Laundering System")
@@ -180,12 +170,10 @@ model_choice = st.sidebar.selectbox(
     ["XGBoost Baseline", "GraphSAGE (Max) [Champion]", "GCN", "GAT"]
 )
 
-# ── 1. Executive Overview & Leaderboard ───────────────────────────────────────
 if navigation == "📊 Executive Overview & Leaderboard":
     st.markdown('<div class="main-title">🛡️ FraudSentinel Overview</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Benchmark results, architectural comparison, and interactive threshold tuning on the Elliptic Bitcoin dataset.</div>', unsafe_allow_html=True)
 
-    # Top Metric Cards
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown("""
@@ -299,8 +287,6 @@ if navigation == "📊 Executive Overview & Leaderboard":
         m3.metric("F1-Score (Illicit)", f"{f1:.4f}")
         m4.metric("True Positives Flagged", f"{tp:,} / {(y_val == 1).sum():,}")
 
-
-# ── 2. Transaction Network Explorer ───────────────────────────────────────────
 elif navigation == "🌐 Transaction Network Explorer":
     st.markdown('<div class="main-title">🌐 Interactive Subgraph Explorer</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Visualize the 2-hop local receptive field around transaction nodes to inspect neighbor fraud clustering.</div>', unsafe_allow_html=True)
@@ -318,7 +304,6 @@ elif navigation == "🌐 Transaction Network Explorer":
     else:
         target_node = case_studies[selected_case]
 
-    # Extract 2-hop subgraph
     node_tensor = torch.tensor([target_node], dtype=torch.long)
     subset, edge_index_sub, mapping, edge_mask_sub = k_hop_subgraph(
         node_idx=node_tensor,
@@ -332,8 +317,6 @@ elif navigation == "🌐 Transaction Network Explorer":
 
     st.write(f"Extracted **2-Hop Subgraph**: **{len(subset_np)}** nodes, **{edge_index_sub.shape[1]}** directed edges.")
 
-    # Convert to NetworkX for layout positioning
-    import networkx as nx
     G = nx.DiGraph()
     for i in range(len(subset_np)):
         G.add_node(i, label=int(sub_y[i]), global_idx=int(subset_np[i]))
@@ -345,7 +328,6 @@ elif navigation == "🌐 Transaction Network Explorer":
 
     pos = nx.spring_layout(G, seed=42)
 
-    # Build 2D Plotly Network Graph
     edge_x = []
     edge_y = []
     for edge in G.edges():
@@ -378,11 +360,11 @@ elif navigation == "🌐 Transaction Network Explorer":
         g_idx = G.nodes[node]["global_idx"]
 
         if c_val == 1:
-            node_color.append("#EF4444") # Red for Illicit
+            node_color.append("#EF4444")
         elif c_val == 0:
-            node_color.append("#10B981") # Green for Licit
+            node_color.append("#10B981")
         else:
-            node_color.append("#94A3B8") # Gray for Unknown
+            node_color.append("#94A3B8")
 
         if node == target_local_idx:
             node_size.append(24)
@@ -420,7 +402,6 @@ elif navigation == "🌐 Transaction Network Explorer":
 
     st.plotly_chart(fig_net, use_container_width=True)
 
-    # Target Node Details Table
     st.markdown("### 📋 Target Transaction Features")
     row_meta = node_df[node_df["node_idx"] == target_node].iloc[0]
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -430,8 +411,6 @@ elif navigation == "🌐 Transaction Network Explorer":
     m4.metric("Out-Degree", int(row_meta["out_degree"]))
     m5.metric("Louvain Community", int(row_meta["community_id"]))
 
-
-# ── 3. Live Predictor & Feature Importance ────────────────────────────────────
 elif navigation == "🔍 Live Predictor & Feature Importance":
     st.markdown('<div class="main-title">🔍 Live Fraud Predictor</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Run real-time inference on any transaction node and analyze feature attributions.</div>', unsafe_allow_html=True)
@@ -492,8 +471,6 @@ elif navigation == "🔍 Live Predictor & Feature Importance":
         fig_topo.update_layout(paper_bgcolor="#1E293B", plot_bgcolor="#1E293B")
         st.plotly_chart(fig_topo, use_container_width=True)
 
-
-# ── 4. Temporal Drift & PSI Monitoring ────────────────────────────────────────
 elif navigation == "📈 Temporal Drift & PSI Monitoring":
     st.markdown('<div class="main-title">📈 Temporal Concept Drift Monitoring</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-title">Inspect feature distribution shifts (PSI) across the dark market disappearance event at timestep 43.</div>', unsafe_allow_html=True)
@@ -519,8 +496,6 @@ elif navigation == "📈 Temporal Drift & PSI Monitoring":
     else:
         st.warning("CSV drift reports not found in reports/. Run `py scripts/run_drift_check.py` to generate them.")
 
-
-# ── 5. Engineering & Architecture Notes ───────────────────────────────────────
 elif navigation == "📖 Engineering & Architecture Notes":
     st.markdown('<div class="main-title">📖 Core Engineering Discoveries</div>', unsafe_allow_html=True)
     st.markdown("""

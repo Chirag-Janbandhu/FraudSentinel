@@ -1,28 +1,11 @@
 """
 Evaluation utilities for FraudSentinel.
-
-evaluate_model(model, data, mask, model_type)
-    Computes Precision, Recall, F1-illicit, and PR-AUC for either the
-    XGBoost or GraphSAGE model on any data split mask.
-    Finds the threshold that maximises F1 on the given split.
-
-compare_models(xgb_metrics, sage_metrics) -> pd.DataFrame
-    Returns a clean side-by-side comparison table of both models.
-
-plot_pr_curves(xgb_metrics, sage_metrics, save_path)
-    Saves an overlaid Precision-Recall curve for both models.
-
-Why F1-illicit and not accuracy?
-    The dataset is ~10 % illicit / 90 % licit.
-    A model predicting "licit" for everything achieves ~90 % accuracy
-    but detects zero fraud. F1-illicit and PR-AUC are the only metrics
-    that honestly reflect fraud-detection performance.
+Computes Precision, Recall, F1-illicit, and PR-AUC for XGBoost and GNN models.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -30,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-matplotlib.use("Agg")   # headless — no display needed
+matplotlib.use("Agg")
 
 from sklearn.metrics import (
     average_precision_score,
@@ -52,251 +35,175 @@ from Fraudsentinel.models import (
 logger = get_logger("FraudSentinel.Evaluate")
 
 
-# ── Core evaluation function ──────────────────────────────────────────────────
-
 def evaluate_model(
     model: XGBoostFraudClassifier | GraphSAGEClassifier | GCNClassifier | GATClassifier,
     data: Data,
     mask: torch.Tensor,
-    model_type: Literal["xgboost", "graphsage", "gcn", "gat"],
-    device: str | None = None,
-    threshold: float | None = None,
-) -> dict[str, float]:
-    """
-    Evaluate a model on the nodes selected by `mask`.
+    split_name: str = "val",
+    fixed_threshold: float | None = None,
+) -> dict[str, float | np.ndarray]:
+    """Evaluates model performance metrics on specified dataset split mask."""
+    eval_mask = mask & data.labeled_mask
+    n_samples = eval_mask.sum().item()
 
-    Parameters
-    ----------
-    model      : Fitted classifier
-    data       : PyG Data object
-    mask       : Boolean mask selecting which nodes to evaluate
-    model_type : "xgboost" | "graphsage" | "gcn" | "gat"
-    device     : torch device string; auto-detected if None
-    threshold  : Classification threshold. If None, we find the threshold
-                 that maximises F1 on this split (so call with val_mask
-                 to find threshold, then pass it to test_mask evaluation).
+    if n_samples == 0:
+        raise ValueError(f"Mask '{split_name}' contains zero labeled nodes.")
 
-    Returns
-    -------
-    dict with keys: f1, precision, recall, pr_auc, threshold, n_samples
-    """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    dev = torch.device(device)
+    y_true = data.y[eval_mask].cpu().numpy()
 
-    # ── Get probabilities ──────────────────────────────────────────────
-    if model_type == "xgboost":
-        X = data.x[mask].cpu().numpy()
-        y_true = data.y[mask].cpu().numpy()
-        proba  = model.predict_proba(X)
-
-    elif model_type in ("graphsage", "gcn", "gat"):
-        model.eval()
-        model = model.to(dev)
-        proba, y_true = _get_sage_probas_fullbatch(model, data, mask, dev)
-
+    if isinstance(model, XGBoostFraudClassifier):
+        X = data.x[eval_mask].cpu().numpy()
+        y_prob = model.predict_proba(X)
     else:
-        raise ValueError(f"Unknown model_type: {model_type!r}")
+        model.eval()
+        device = next(model.parameters()).device
+        x_dev = data.x.to(device)
+        edge_dev = data.edge_index.to(device)
+        with torch.no_grad():
+            y_prob_all = model.predict_proba(x_dev, edge_dev)
+        y_prob = y_prob_all[eval_mask].cpu().numpy()
 
-    # ── Find optimal threshold (maximise F1) ───────────────────────────
-    if threshold is None:
-        threshold = _find_best_threshold(y_true, proba)
-        logger.info(f"[{model_type}] Optimal threshold (max F1): {threshold:.3f}")
+    pr_auc = float(average_precision_score(y_true, y_prob))
 
-    y_pred = (proba >= threshold).astype(int)
+    precisions_curve, recalls_curve, _ = precision_recall_curve(y_true, y_prob)
 
-    f1        = f1_score(y_true, y_pred, pos_label=1, zero_division=0)
-    precision = precision_score(y_true, y_pred, pos_label=1, zero_division=0)
-    recall    = recall_score(y_true, y_pred, pos_label=1, zero_division=0)
-    pr_auc    = average_precision_score(y_true, proba)
+    if fixed_threshold is not None:
+        best_thresh = fixed_threshold
+    else:
+        best_thresh, _, _, _ = _find_best_threshold(y_true, y_prob)
 
-    metrics = {
-        "f1":        round(f1, 4),
-        "precision": round(precision, 4),
-        "recall":    round(recall, 4),
-        "pr_auc":   round(pr_auc, 4),
-        "threshold": round(threshold, 4),
-        "n_samples": int(mask.sum().item()),
-        # Store raw arrays for PR curve plotting
-        "_proba":  proba,
-        "_y_true": y_true,
+    y_pred = (y_prob >= best_thresh).astype(int)
+
+    precision = float(precision_score(y_true, y_pred, zero_division=0))
+    recall = float(recall_score(y_true, y_pred, zero_division=0))
+    f1 = float(f1_score(y_true, y_pred, zero_division=0))
+
+    n_illicit = int((y_true == 1).sum())
+    n_licit = int((y_true == 0).sum())
+
+    logger.info(f"[{split_name.upper()}] Metrics ({n_samples:,} labeled nodes: {n_illicit} illicit, {n_licit} licit)")
+    logger.info(f"  PR-AUC          : {pr_auc:.4f}")
+    logger.info(f"  Optimal Threshold: {best_thresh:.4f}")
+    logger.info(f"  Precision       : {precision:.4f}")
+    logger.info(f"  Recall          : {recall:.4f}")
+    logger.info(f"  F1-Illicit      : {f1:.4f}")
+
+    return {
+        "split": split_name,
+        "n_samples": n_samples,
+        "n_illicit": n_illicit,
+        "n_licit": n_licit,
+        "pr_auc": pr_auc,
+        "best_threshold": best_thresh,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "y_true": y_true,
+        "y_prob": y_prob,
+        "precisions_curve": precisions_curve,
+        "recalls_curve": recalls_curve,
     }
 
-    logger.info(
-        f"[{model_type}] n={metrics['n_samples']} | "
-        f"F1={f1:.4f} | P={precision:.4f} | R={recall:.4f} | "
-        f"PR-AUC={pr_auc:.4f} | threshold={threshold:.3f}"
-    )
-    return metrics
 
+def _find_best_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray
+) -> tuple[float, float, float, float]:
+    """Sweeps 100 probability thresholds to identify max F1 threshold."""
+    thresholds = np.linspace(0.01, 0.99, 99)
+    best_f1 = -1.0
+    best_thresh = 0.5
+    best_prec = 0.0
+    best_rec = 0.0
 
-# ── Comparison table ──────────────────────────────────────────────────────────
+    for t in thresholds:
+        preds = (y_prob >= t).astype(int)
+        f1 = f1_score(y_true, preds, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = float(f1)
+            best_thresh = float(t)
+            best_prec = float(precision_score(y_true, preds, zero_division=0))
+            best_rec = float(recall_score(y_true, preds, zero_division=0))
+
+    return best_thresh, best_f1, best_prec, best_rec
+
 
 def compare_models(
     xgb_metrics: dict,
-    sage_metrics: dict,
-    gcn_metrics: dict,
-    gat_metrics: dict,
-    split_name: str = "Test",
+    gnn_metrics: dict,
+    gnn_name: str = "GraphSAGE",
 ) -> pd.DataFrame:
-    """
-    Build a human-readable comparison DataFrame for all four models.
-
-    Parameters
-    ----------
-    xgb_metrics  : Output of evaluate_model(..., model_type="xgboost")
-    sage_metrics : Output of evaluate_model(..., model_type="graphsage")
-    gcn_metrics  : Output of evaluate_model(..., model_type="gcn")
-    gat_metrics  : Output of evaluate_model(..., model_type="gat")
-    split_name   : Label for the split (e.g. "Validation", "Test")
-
-    Returns
-    -------
-    pd.DataFrame with models as columns and metrics as rows
-    """
-    display_keys = ["f1", "precision", "recall", "pr_auc", "threshold", "n_samples"]
-
-    df = pd.DataFrame(
+    """Builds side-by-side DataFrame comparison table."""
+    df = pd.DataFrame([
         {
-            "XGBoost Baseline": {k: xgb_metrics[k] for k in display_keys},
-            "GraphSAGE (Max)": {k: sage_metrics[k] for k in display_keys},
-            "GCN Baseline": {k: gcn_metrics[k] for k in display_keys},
-            "GAT (Attention)": {k: gat_metrics[k] for k in display_keys},
-        }
-    )
-    df.index.name = f"Metric ({split_name})"
-
-    logger.info(f"\n{'='*65}\nModel Comparison ({split_name} Split)\n{'='*65}")
-    logger.info(f"\n{df.to_string()}\n")
+            "Model": "XGBoost (Tabular Baseline)",
+            "Split": xgb_metrics["split"],
+            "PR-AUC": f"{xgb_metrics['pr_auc']:.4f}",
+            "Best Threshold": f"{xgb_metrics['best_threshold']:.4f}",
+            "Precision": f"{xgb_metrics['precision']:.4f}",
+            "Recall": f"{xgb_metrics['recall']:.4f}",
+            "F1-Illicit": f"{xgb_metrics['f1']:.4f}",
+        },
+        {
+            "Model": f"{gnn_name} (GNN)",
+            "Split": gnn_metrics["split"],
+            "PR-AUC": f"{gnn_metrics['pr_auc']:.4f}",
+            "Best Threshold": f"{gnn_metrics['best_threshold']:.4f}",
+            "Precision": f"{gnn_metrics['precision']:.4f}",
+            "Recall": f"{gnn_metrics['recall']:.4f}",
+            "F1-Illicit": f"{gnn_metrics['f1']:.4f}",
+        },
+    ])
     return df
 
 
-# ── PR curve plot ─────────────────────────────────────────────────────────────
-
 def plot_pr_curves(
     xgb_metrics: dict,
-    sage_metrics: dict,
-    gcn_metrics: dict,
-    gat_metrics: dict,
-    save_path: str | Path = "reports/figures/pr_curves.png",
-    split_name: str = "Validation",
+    gnn_metrics: dict,
+    save_path: str | Path,
+    gnn_name: str = "GraphSAGE",
 ) -> None:
-    """
-    Save overlaid Precision-Recall curves for all four benchmarked models.
-
-    Parameters
-    ----------
-    xgb_metrics  : Output of evaluate_model
-    sage_metrics : Output of evaluate_model
-    gcn_metrics  : Output of evaluate_model
-    gat_metrics  : Output of evaluate_model
-    save_path    : Where to write the PNG
-    split_name   : Displayed in the plot title
-    """
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
+    """Plot overlaid Precision-Recall curves."""
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    for label, metrics, color, ls in [
-        ("XGBoost Baseline", xgb_metrics, "#E07B39", "-"),
-        ("GraphSAGE (Max)",  sage_metrics, "#4C78A8", "--"),
-        ("GCN Baseline",     gcn_metrics,  "#55A868", "-."),
-        ("GAT (Attention)",  gat_metrics,  "#C44E52", ":"),
-    ]:
-        prec, rec, _ = precision_recall_curve(
-            metrics["_y_true"], metrics["_proba"], pos_label=1
-        )
-        auc = metrics["pr_auc"]
-        ax.plot(
-            rec, prec,
-            label=f"{label} (AUC={auc:.3f})",
-            color=color, linestyle=ls, linewidth=2.2
-        )
-        # Mark the chosen operating point
-        ax.scatter(
-            [metrics["recall"]], [metrics["precision"]],
-            color=color, s=80, zorder=5
-        )
+    ax.plot(
+        xgb_metrics["recalls_curve"],
+        xgb_metrics["precisions_curve"],
+        label=f"XGBoost (PR-AUC = {xgb_metrics['pr_auc']:.4f})",
+        color="navy",
+        linewidth=2,
+    )
+    ax.plot(
+        gnn_metrics["recalls_curve"],
+        gnn_metrics["precisions_curve"],
+        label=f"{gnn_name} (PR-AUC = {gnn_metrics['pr_auc']:.4f})",
+        color="darkorange",
+        linewidth=2,
+    )
 
-    illicit_rate = float(xgb_metrics["_y_true"].mean())
+    base_rate = xgb_metrics["n_illicit"] / xgb_metrics["n_samples"]
     ax.axhline(
-        illicit_rate, linestyle=":", color="grey", linewidth=1,
-        label=f"Random classifier (P={illicit_rate:.2f})"
+        y=base_rate,
+        color="gray",
+        linestyle="--",
+        label=f"Random Baseline (no-skill = {base_rate:.4f})",
     )
 
-    ax.set_xlabel("Recall (Illicit)", fontsize=13)
-    ax.set_ylabel("Precision (Illicit)", fontsize=13)
+    ax.set_xlabel("Recall (Illicit Class)", fontsize=12)
+    ax.set_ylabel("Precision (Illicit Class)", fontsize=12)
     ax.set_title(
-        f"Precision-Recall Curve -- {split_name} Split\n"
-        f"Elliptic Bitcoin Fraud Detection",
-        fontsize=14, fontweight="bold"
+        f"Precision-Recall Curve Comparison — {xgb_metrics['split'].upper()} Split",
+        fontsize=14,
+        pad=12,
     )
-    ax.legend(fontsize=11, loc="upper right")
-    ax.set_xlim([0, 1])
-    ax.set_ylim([0, 1.05])
-    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=11)
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
 
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
     plt.close(fig)
-    logger.info(f"PR curve saved to {save_path}")
-
-
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-def _find_best_threshold(
-    y_true: np.ndarray, proba: np.ndarray
-) -> float:
-    """
-    Sweep thresholds in [0.1, 0.9] and return the one maximising F1-illicit.
-    This is done on the *same* split to avoid leakage — caller is responsible
-    for using the val split to find the threshold and the test split to report.
-    """
-    best_t, best_f1 = 0.5, -1.0
-    for t in np.linspace(0.1, 0.9, 81):
-        preds = (proba >= t).astype(int)
-        f1 = f1_score(y_true, preds, pos_label=1, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_t = f1, t
-    return float(best_t)
-
-
-@torch.no_grad()
-def _get_sage_probas_fullbatch(
-    model: GraphSAGEClassifier,
-    data: Data,
-    mask: torch.Tensor,
-    device: torch.device,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Full-graph forward pass -> (probabilities, true_labels) for masked nodes.
-    Applies scaler to topological features only (cols 165+), matching training.
-    """
-    import pickle
-    TOPO_START = 165
-    x_np = data.x.cpu().numpy().copy()
-
-    # Apply the same scaler used during training
-    scaler = getattr(model, "scaler", None)
-    if scaler is None:
-        from pathlib import Path
-        scaler_path = Path("models/feature_scaler.pkl")
-        if scaler_path.exists():
-            with open(scaler_path, "rb") as f:
-                scaler = pickle.load(f)
-            logger.info("Loaded feature_scaler.pkl for GraphSAGE inference")
-        else:
-            logger.warning(
-                "No feature scaler found. Using raw topological features."
-            )
-
-    if scaler is not None:
-        x_np[:, TOPO_START:] = scaler.transform(x_np[:, TOPO_START:])
-
-    x          = torch.tensor(x_np, dtype=torch.float).to(device)
-    edge_index = data.edge_index.to(device)
-    all_logits = model(x, edge_index).squeeze(-1)
-    proba  = torch.sigmoid(all_logits[mask]).cpu().numpy()
-    labels = data.y[mask].cpu().numpy()
-    return proba, labels
+    logger.info(f"Saved PR curve plot to {save_path}")
