@@ -152,10 +152,13 @@ def train_xgboost(
 def train_graphsage(
     data: Data,
     cfg: dict[str, Any] | None = None,
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | torch.device | None = None,
     pseudo_labels: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[GraphSAGEClassifier, StandardScaler, dict[str, list[float]]]:
     """Trains GraphSAGE GNN classifier with full-batch message passing."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if cfg is None:
         cfg = DEFAULT_CFG["sage"]
 
@@ -292,10 +295,13 @@ def train_graphsage(
 def train_gcn(
     data: Data,
     cfg: dict[str, Any] | None = None,
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | torch.device | None = None,
     pseudo_labels: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[GCNClassifier, StandardScaler, dict[str, list[float]]]:
     """Trains GCN classifier with full-batch message passing."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if cfg is None:
         cfg = DEFAULT_CFG["gcn"]
 
@@ -404,10 +410,13 @@ def train_gcn(
 def train_gat(
     data: Data,
     cfg: dict[str, Any] | None = None,
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | torch.device | None = None,
     pseudo_labels: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[GATClassifier, StandardScaler, dict[str, list[float]]]:
     """Trains GAT classifier with multi-head attention."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if cfg is None:
         cfg = DEFAULT_CFG["gat"]
 
