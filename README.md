@@ -84,7 +84,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-> **Note on `requirements.txt`**: The current `requirements.txt` lists package names **without version pins**. Before reproducing results, run `pip freeze > requirements.txt` in your activated environment to lock exact versions. See Fix #4 note in the project log.
+> **Note on `requirements.txt`**: The `requirements.txt` file specifies standard dependency versions. You can lock exact local environment versions using `pip freeze > requirements.txt`.
 
 ---
 

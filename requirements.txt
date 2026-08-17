@@ -10,4 +10,6 @@ torch-geometric
 python-louvain
 xgboost
 tqdm
+streamlit
+plotly
 -e .

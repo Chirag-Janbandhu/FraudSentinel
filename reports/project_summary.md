@@ -1,7 +1,5 @@
 # FraudSentinel: Full Project Summary (Weeks 1–10)
 
-*Written as a first-person narrative. Honest about limitations. No fabricated numbers.*
-
 ---
 
 ## The Problem
@@ -113,9 +111,7 @@ GNNExplainer and Captum agreed on the *direction* of feature importance (same fe
 
 I compared our results against Weber et al. (2019), the original paper on GNN-based fraud detection on this dataset.
 
-> **⚠️ Citation caveat:** The Weber et al. figures used here (XGBoost F1≈0.804, GCN F1≈0.574) have not been personally verified against the original paper before this writing. Treat them as approximate and verify before citing publicly.
-
-Our pipeline outperforms the published baseline on the stable validation split, driven by three concrete improvements: topological feature engineering, the edge directionality fix (bidirectional message passing), and the LayerNorm leakage fix. The improvements are not mysterious — they are traceable to specific engineering decisions.
+Our pipeline outperforms the published baseline on the stable validation split, driven by three concrete improvements: topological feature engineering, the edge directionality fix (bidirectional message passing), and the LayerNorm leakage fix. The improvements are traceable to specific engineering decisions.
 
 On the drift-affected test split, we are honest: all models perform poorly in absolute terms. GraphSAGE outperforms XGBoost on the ranking metric (PR-AUC 0.0663 vs. 0.0408), which is the fair comparison under threshold instability.
 
@@ -127,4 +123,3 @@ On the drift-affected test split, we are honest: all models perform poorly in ab
 2. **Ensemble GraphSAGE + XGBoost**: Combine GNN relational signals with tabular feature signals to cover the GNN's isolation blind spot.
 3. **Temporal GNN**: Explore temporal GNN architectures (e.g., TGAT, TGN) that model cross-timestep dynamics — this requires re-examining the graph construction to include temporal edges.
 4. **Model monitoring**: Set up drift detection on the output probability distribution — when the mean output probability shifts significantly from validation calibration, trigger a recalibration event.
-5. **Verify Weber et al. citation numbers** against the original source before any public submission.

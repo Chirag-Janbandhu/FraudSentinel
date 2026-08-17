@@ -58,7 +58,7 @@ We optimized classification thresholds on the Validation Split (timesteps 35-42)
 
 ## Cell 4: Walkforward Analysis & Concept Drift Collapse on the Test Split
 
-Timesteps 43–49 represent a severe **domain shift** corresponding to the mid-2017 shutdown of a major darknet marketplace (Hydra). Illicit actors immediately modified their transaction characteristics to evade detection, causing local features to undergo severe concept drift.
+Timesteps 43–49 represent a severe **domain shift** corresponding to the disappearance of a major dark market, as documented by Elliptic in their public release notes for this dataset (Bellei, 2019). Illicit actors immediately modified their transaction characteristics to evade detection, causing local features to undergo severe concept drift.
 
 By locking the validation thresholds and evaluating step-by-step, we obtain:
 

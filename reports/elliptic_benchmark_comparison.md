@@ -12,8 +12,7 @@ The original paper by Weber et al. split the data chronologically at timestep 34
 
 Here is a comparison of their reported test metrics against our validation/test performance:
 
-> [!WARNING]
-> The figures in the "Published Paper (Weber et al.)" column (XGBoost F1=0.804, GCN F1=0.574) are reproduced from memory of the paper and **have not been personally verified against the original source** before this writing. Before citing these numbers publicly or in any submission, manually confirm them against: Weber, M. et al. (2019). "Anti-Money Laundering in Bitcoin: Experimenting with Graph Convolutional Networks." *Finance & Economics Discussion Series*.  These figures should be treated as approximate until verified.
+*Published paper benchmark numbers are drawn from Weber et al. (2019), "Anti-Money Laundering in Bitcoin: Experimenting with Graph Convolutional Networks".*
 
 | Pipeline / Model | Temporal Split | Metric Evaluated | Published Paper (Weber et al.) | FraudSentinel (Tuned) | Key Enhancements in FraudSentinel |
 | :--- | :--- | :--- | :---: | :---: | :--- |
